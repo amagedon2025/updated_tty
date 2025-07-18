@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Phone, PhoneCall, PhoneOff, Volume2, Settings, MessageCircle, Keyboard, VolumeX, Mic, MicOff } from 'lucide-react';
 import axios from 'axios';
 
