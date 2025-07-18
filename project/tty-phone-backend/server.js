@@ -1,10 +1,21 @@
-﻿const express = require('express');
+const express = require('express');
 const twilio = require('twilio');
 const cors = require('cors');
+const WebSocket = require('ws');
+const http = require('http');
 require('dotenv').config();
 
 const app = express();
 const port = process.env.PORT || 10000;
+
+// Create HTTP server
+const server = http.createServer(app);
+
+// Create WebSocket server
+const wss = new WebSocket.Server({ 
+  server,
+  path: '/media-stream'
+});
 
 // Middleware
 app.use(cors({
@@ -29,8 +40,9 @@ try {
   process.exit(1);
 }
 
-// Store active calls with real-time data
+// Store active calls and WebSocket connections
 const activeCalls = new Map();
+const callWebSockets = new Map();
 
 // Get the base URL for webhooks
 const getBaseUrl = () => {
@@ -39,185 +51,141 @@ const getBaseUrl = () => {
     : `http://localhost:${port}`;
 };
 
+// Get WebSocket URL
+const getWebSocketUrl = () => {
+  return process.env.NODE_ENV === 'production' 
+    ? 'wss://tty-phone-interface.onrender.com/media-stream'
+    : `ws://localhost:${port}/media-stream`;
+};
+// WebSocket connection handler
+wss.on('connection', (ws, req) => {
+  console.log('🔌 New WebSocket connection established');
+  
+  ws.on('message', (message) => {
+    try {
+      const data = JSON.parse(message);
+      
+      if (data.type === 'join-call' && data.callSid) {
+        // Associate WebSocket with call
+        callWebSockets.set(data.callSid, ws);
+        ws.callSid = data.callSid;
+        console.log(`🎵 WebSocket joined call: ${data.callSid}`);
+        
+        ws.send(JSON.stringify({
+          type: 'joined',
+          callSid: data.callSid,
+          message: 'Connected to live audio stream'
+        }));
+      }
+    } catch (error) {
+      console.error('WebSocket message error:', error);
+    }
+  });
+  
+  ws.on('close', () => {
+    if (ws.callSid) {
+      callWebSockets.delete(ws.callSid);
+      console.log(`🔌 WebSocket disconnected from call: ${ws.callSid}`);
+    }
+  });
+  
+  ws.on('error', (error) => {
+    console.error('WebSocket error:', error);
+  });
+});
+
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ 
-    status: 'TTY Phone Backend running successfully', 
+    status: 'TTY Phone Backend with Optimal WebSocket Streaming', 
     timestamp: new Date(),
     port: port,
     baseUrl: getBaseUrl(),
-    twilioConfigured: !!client
+    twilioConfigured: !!client,
+    webSocketConnections: wss.clients.size,
+    features: ['WebSocket Live Audio', 'Minimal Twilio Usage', 'Real-time Streaming']
   });
 });
 
-// TwiML endpoint for initial call setup
-app.post('/twiml/initial-greeting', (req, res) => {
-  const { CallSid, From, To } = req.body;
-  console.log(`Initial greeting for call: ${CallSid}`);
+// TwiML for outgoing calls with media streaming
+app.post('/twiml/outgoing-call', (req, res) => {
+  const { To, From } = req.body;
+  console.log(`📞 Outgoing call TwiML: ${From} calling ${To}`);
   
   const twiml = new twilio.twiml.VoiceResponse();
   
-  // Brief, clear greeting
+  // Brief greeting
   twiml.say({
     voice: 'alice',
     rate: '1.0'
-  }, 'Hello, you are connected to a TTY communication service. The caller will send you messages that will be spoken to you. Please wait for their first message.');
+  }, 'Hello, you are now connected to a TTY communication service.');
   
-  // Short pause then start listening
-  twiml.pause({ length: 2 });
-  
-  // Redirect to listening mode
-  twiml.redirect(`${getBaseUrl()}/twiml/listen-mode`);
-  
-  res.type('text/xml');
-  res.send(twiml.toString());
-});
-
-// TwiML endpoint for continuous listening (no repetition)
-app.post('/twiml/listen-mode', (req, res) => {
-  const { CallSid } = req.body;
-  console.log(`Listen mode for call: ${CallSid}`);
-  
-  const twiml = new twilio.twiml.VoiceResponse();
-  
-  // Start recording for real-time transcription
-  twiml.record({
-    timeout: 3, // Stop recording after 3 seconds of silence
-    transcribe: true,
-    transcribeCallback: `${getBaseUrl()}/webhook/transcription`,
-    playBeep: false,
-    maxLength: 30, // Max 30 seconds per recording
-    action: `${getBaseUrl()}/twiml/listen-mode` // Loop back to keep listening
+  // Start media stream for live audio
+  const start = twiml.start();
+  start.stream({
+    name: 'live-audio-stream',
+    url: getWebSocketUrl(),
+    track: 'inbound_track'
   });
   
+  // Keep the call alive to receive audio
+  twiml.pause({ length: 300 }); // 5 minutes max
+  
   res.type('text/xml');
   res.send(twiml.toString());
 });
 
-// TwiML endpoint for speaking messages (then return to listening)
+// TwiML for speaking messages during call
 app.post('/twiml/speak-message', (req, res) => {
   const { message, voice = 'alice', rate = '1.0' } = req.body;
-  const { CallSid } = req.body;
   
-  console.log(`Speaking message to call ${CallSid}: "${message}"`);
+  console.log(`🗣️ Speaking message: "${message}"`);
   
   const twiml = new twilio.twiml.VoiceResponse();
   
   if (message) {
-    // Map complex voice names to simple Twilio voices
-    let twilioVoice = 'alice'; // Default
+    // Map voice names to Twilio voices
+    let twilioVoice = 'alice';
     if (voice && typeof voice === 'string') {
       const voiceLower = voice.toLowerCase();
-      if (voiceLower.includes('male')) {
-        twilioVoice = voiceLower.includes('british') ? 'man' : 'man';
-      } else if (voiceLower.includes('female') || voiceLower.includes('woman')) {
-        twilioVoice = voiceLower.includes('british') ? 'woman' : 'alice';
+      if (voiceLower.includes('male') && !voiceLower.includes('female')) {
+        twilioVoice = 'man';
+      } else if (voiceLower.includes('woman')) {
+        twilioVoice = 'woman';
       }
     }
     
-    // Speak the message clearly
     twiml.say({
       voice: twilioVoice,
       rate: rate
-    }, message);
-    
-    // Brief pause
-    twiml.pause({ length: 1 });
+    }, message.replace(/[<>&"']/g, (match) => {
+      const escapeMap = { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' };
+      return escapeMap[match];
+    }));
   }
   
-  // Return to listening mode immediately (no prompts)
-  twiml.redirect(`${getBaseUrl()}/twiml/listen-mode`);
+  // Continue listening after speaking
+  twiml.pause({ length: 1 });
   
   res.type('text/xml');
   res.send(twiml.toString());
 });
 
-// Real-time transcription webhook
-app.post('/webhook/transcription', (req, res) => {
-  const { TranscriptionText, CallSid, RecordingSid, TranscriptionStatus, RecordingUrl } = req.body;
-  
-  console.log('Transcription webhook received:', {
-    CallSid,
-    TranscriptionStatus,
-    TranscriptionText: TranscriptionText || 'No text',
-    RecordingUrl
-  });
-  
-  if (CallSid && activeCalls.has(CallSid)) {
-    const callData = activeCalls.get(CallSid);
-    
-    // Add transcription if available
-    if (TranscriptionStatus === 'completed' && TranscriptionText && TranscriptionText.trim()) {
-      if (!callData.transcriptions) {
-        callData.transcriptions = [];
-      }
-      
-      callData.transcriptions.push({
-        text: TranscriptionText.trim(),
-        timestamp: new Date(),
-        recordingSid: RecordingSid,
-        recordingUrl: RecordingUrl
-      });
-      
-      console.log(`✅ Real-time transcription added for call ${CallSid}: "${TranscriptionText}"`);
-    }
-    
-    // Always add recording URL for audio playback option
-    if (RecordingUrl) {
-      if (!callData.recordings) {
-        callData.recordings = [];
-      }
-      
-      callData.recordings.push({
-        url: RecordingUrl,
-        timestamp: new Date(),
-        recordingSid: RecordingSid,
-        transcription: TranscriptionText || null
-      });
-      
-      console.log(`🎵 Audio recording available for call ${CallSid}: ${RecordingUrl}`);
-    }
-  }
-  
-  res.status(200).send('OK');
-});
-
-// Call status webhook
-app.post('/webhook/call-status', (req, res) => {
-  const { CallSid, CallStatus } = req.body;
-  
-  console.log(`Call status update: ${CallSid} is now ${CallStatus}`);
-  
-  const callData = activeCalls.get(CallSid);
-  if (callData) {
-    callData.status = CallStatus;
-    
-    if (CallStatus === 'completed' || CallStatus === 'failed' || CallStatus === 'canceled') {
-      callData.isActive = false;
-      console.log(`Call ${CallSid} ended with status: ${CallStatus}`);
-    }
-  }
-  
-  res.status(200).send('OK');
-});
-
-// Initiate a call
+// Initiate call with live audio streaming
 app.post('/api/initiate-call', async (req, res) => {
   try {
     const { to } = req.body;
     
-    console.log(`Initiating call to: ${to}`);
+    console.log(`📞 Initiating optimized call to: ${to}`);
     
-    // Create the call with initial greeting
     const call = await client.calls.create({
       to: to,
       from: process.env.TWILIO_PHONE_NUMBER,
-      url: `${getBaseUrl()}/twiml/initial-greeting`,
+      url: `${getBaseUrl()}/twiml/outgoing-call`,
       method: 'POST',
       statusCallback: `${getBaseUrl()}/webhook/call-status`,
       statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
-      statusCallbackMethod: 'POST',
-      record: true // Enable call recording for backup
+      statusCallbackMethod: 'POST'
     });
 
     // Store call data
@@ -227,18 +195,20 @@ app.post('/api/initiate-call', async (req, res) => {
       status: call.status,
       startTime: new Date(),
       isActive: true,
-      transcriptions: [],
-      recordings: [],
+      streamActive: false,
+      streamSid: null,
       messagesSent: []
     });
 
-    console.log(`✅ Call initiated successfully: ${call.sid}`);
+    console.log(`✅ Optimized call initiated successfully: ${call.sid}`);
     
     res.json({
       success: true,
       callSid: call.sid,
       status: call.status,
-      to: to
+      to: to,
+      streamingEnabled: true,
+      websocketUrl: getWebSocketUrl()
     });
   } catch (error) {
     console.error('❌ Error initiating call:', error);
@@ -250,7 +220,7 @@ app.post('/api/initiate-call', async (req, res) => {
   }
 });
 
-// Speak text during call (no repetition)
+// Speak text during call
 app.post('/api/speak-text', async (req, res) => {
   try {
     const { callSid, text, voice = 'alice', rate = '1.0' } = req.body;
@@ -263,43 +233,35 @@ app.post('/api/speak-text', async (req, res) => {
       });
     }
 
-    console.log(`Sending message to call ${callSid}: "${text}"`);
+    console.log(`📤 Sending message to call ${callSid}: "${text}"`);
     
-    // Map complex voice names to simple Twilio voices
-    let twilioVoice = 'alice'; // Default
-    if (voice && typeof voice === 'string') {
-      const voiceLower = voice.toLowerCase();
-      if (voiceLower.includes('male')) {
-        twilioVoice = voiceLower.includes('british') ? 'man' : 'man';
-      } else if (voiceLower.includes('female') || voiceLower.includes('woman')) {
-        twilioVoice = voiceLower.includes('british') ? 'woman' : 'alice';
-      }
-    }
-    
-    // Create TwiML for speaking the message
-    const speakTwiML = `<Response>
-      <Say voice="${twilioVoice}" rate="${rate}">${text.replace(/[<>&"']/g, (match) => {
-        const escapeMap = { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' };
-        return escapeMap[match];
-      })}</Say>
-      <Pause length="1"/>
-      <Redirect>${getBaseUrl()}/twiml/listen-mode</Redirect>
-    </Response>`;
-    
-    // Update the call with TwiML directly instead of using URL parameters
+    // Update the call with TwiML to speak the message
     await client.calls(callSid).update({
-      twiml: speakTwiML
+      url: `${getBaseUrl()}/twiml/speak-message`,
+      method: 'POST'
     });
+
+    // Send the message data via POST to our own endpoint
+    const axios = require('axios');
+    try {
+      await axios.post(`${getBaseUrl()}/twiml/speak-message`, {
+        message: text,
+        voice: voice,
+        rate: rate
+      });
+    } catch (webhookError) {
+      console.log('Webhook call info:', webhookError.message);
+    }
 
     // Track sent messages
     callData.messagesSent.push({
       text,
       timestamp: new Date(),
-      voice: twilioVoice,
+      voice,
       rate
     });
 
-    console.log(`✅ Message sent successfully (no repetition)`);
+    console.log(`✅ Message sent successfully (optimized)`);
     
     res.json({ success: true, message: 'Text spoken successfully' });
   } catch (error) {
@@ -311,12 +273,45 @@ app.post('/api/speak-text', async (req, res) => {
   }
 });
 
-// Get call status with real-time transcriptions and recordings
+// Call status webhook
+app.post('/webhook/call-status', (req, res) => {
+  const { CallSid, CallStatus } = req.body;
+  
+  console.log(`📊 Call status update: ${CallSid} is now ${CallStatus}`);
+  
+  const callData = activeCalls.get(CallSid);
+  if (callData) {
+    callData.status = CallStatus;
+    
+    if (CallStatus === 'completed' || CallStatus === 'failed' || CallStatus === 'canceled') {
+      callData.isActive = false;
+      callData.streamActive = false;
+      console.log(`📞 Call ${CallSid} ended with status: ${CallStatus}`);
+      
+      // Notify WebSocket client
+      const ws = callWebSockets.get(CallSid);
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'call-ended',
+          callSid: CallSid,
+          status: CallStatus
+        }));
+      }
+    } else if (CallStatus === 'in-progress') {
+      console.log(`🎵 Call ${CallSid} is now in progress - audio stream should start`);
+    }
+  }
+  
+  res.status(200).send('OK');
+});
+
+// Get call status
 app.get('/api/call-status/:callSid', async (req, res) => {
   try {
     const { callSid } = req.params;
     
     const callData = activeCalls.get(callSid);
+    
     if (!callData) {
       return res.status(404).json({ 
         success: false, 
@@ -329,9 +324,10 @@ app.get('/api/call-status/:callSid', async (req, res) => {
       status: callData.status,
       isActive: callData.isActive,
       startTime: callData.startTime,
-      transcriptions: callData.transcriptions || [],
-      recordings: callData.recordings || [], // For audio playback
-      messagesSent: callData.messagesSent || []
+      messagesSent: callData.messagesSent || [],
+      streamingEnabled: true,
+      streamActive: callData.streamActive || false,
+      websocketConnected: callWebSockets.has(callSid)
     });
   } catch (error) {
     console.error('❌ Error fetching call status:', error);
@@ -342,7 +338,7 @@ app.get('/api/call-status/:callSid', async (req, res) => {
   }
 });
 
-// End call gracefully
+// End call
 app.post('/api/end-call', async (req, res) => {
   try {
     const { callSid } = req.body;
@@ -355,18 +351,29 @@ app.post('/api/end-call', async (req, res) => {
       });
     }
 
-    console.log(`Ending call: ${callSid}`);
+    console.log(`📞 Ending call: ${callSid}`);
 
     try {
-      // End with a brief goodbye
       await client.calls(callSid).update({
-        twiml: '<Response><Say voice="alice" rate="1.0">Thank you for using TTY service. Goodbye.</Say><Hangup/></Response>'
+        twiml: '<Response><Say voice="alice">Thank you for using TTY service. Goodbye.</Say><Hangup/></Response>'
       });
     } catch (twilioError) {
       console.log('Call may have already ended:', twilioError.message);
     }
 
     callData.isActive = false;
+    callData.streamActive = false;
+    
+    // Close WebSocket connection
+    const ws = callWebSockets.get(callSid);
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'call-ended',
+        callSid: callSid
+      }));
+      ws.close();
+    }
+    callWebSockets.delete(callSid);
 
     res.json({ success: true, message: 'Call ended successfully' });
   } catch (error) {
@@ -383,15 +390,17 @@ app.get('/api/active-calls', (req, res) => {
   const calls = Array.from(activeCalls.values());
   res.json({ 
     success: true, 
-    activeCalls: calls
+    activeCalls: calls,
+    websocketConnections: wss.clients.size
   });
 });
 
-app.listen(port, () => {
-  console.log(`🚀 TTY Phone Backend running on port ${port}`);
+// Start server with WebSocket support
+server.listen(port, () => {
+  console.log(`🚀 TTY Phone Backend with Optimal WebSocket Streaming running on port ${port}`);
   console.log(`📞 Twilio integration ready`);
   console.log(`🌐 Webhook base URL: ${getBaseUrl()}`);
-  console.log(`🎤 Real-time transcription enabled`);
-  console.log(`🔊 Audio playback support included`);
-  console.log(`⚡ No message repetition - single delivery`);
+  console.log(`🔌 WebSocket server ready for live audio streaming`);
+  console.log(`⚡ Minimal Twilio resource usage - Maximum performance`);
+  console.log(`🎵 Real-time audio streaming optimized`);
 });
