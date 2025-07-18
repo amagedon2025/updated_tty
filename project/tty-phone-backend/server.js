@@ -160,31 +160,25 @@ app.post('/twiml/continue-call', (req, res) => {
 
 // TwiML for speaking messages during call
 app.post('/twiml/speak-message', (req, res) => {
-  const { message, voice = 'alice', rate = '1.0' } = req.body;
+  const { message, voice = 'alice', rate = '1.0' } = req.query;
   
   console.log(`🗣️ Speaking message: "${message}"`);
   
   const twiml = new twilio.twiml.VoiceResponse();
   
+  // Start media stream again to ensure it's active
+  const start = twiml.start();
+  start.stream({
+    name: 'live-audio-stream',
+    url: getWebSocketUrl(),
+    track: 'inbound_track'
+  });
+  
   if (message) {
-    // Map voice names to Twilio voices
-    let twilioVoice = 'alice';
-    if (voice && typeof voice === 'string') {
-      const voiceLower = voice.toLowerCase();
-      if (voiceLower.includes('male') && !voiceLower.includes('female')) {
-        twilioVoice = 'man';
-      } else if (voiceLower.includes('woman')) {
-        twilioVoice = 'woman';
-      }
-    }
-    
     twiml.say({
-      voice: twilioVoice,
+      voice: voice,
       rate: rate
-    }, message.replace(/[<>&"']/g, (match) => {
-      const escapeMap = { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' };
-      return escapeMap[match];
-    }));
+    }, message);
   }
   
   // Continue listening after speaking
@@ -273,23 +267,20 @@ app.post('/api/speak-text', async (req, res) => {
       </Say>
     </Response>`;
     
-    // Create a new call leg to play the message without interrupting the main call
-    try {
-      await client.calls.create({
-        to: callData.to,
-        from: process.env.TWILIO_PHONE_NUMBER,
-        twiml: twiml
-      });
-    } catch (twilioError) {
-      console.error('Error creating message call:', twilioError);
-      // Fallback: try updating the existing call
-      await client.calls(callSid).update({
-        twiml: `<Response>
-          <Say voice="alice" rate="${rate}">${text}</Say>
-          <Gather input="speech" timeout="300" action="${getBaseUrl()}/twiml/continue-call" method="POST" />
-        </Response>`
-      });
-    }
+    // Update the existing call to speak the message
+    const escapedText = text.replace(/[<>&"']/g, (match) => {
+      const escapeMap = { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' };
+      return escapeMap[match];
+    });
+    
+    await client.calls(callSid).update({
+      url: `${getBaseUrl()}/twiml/speak-message`,
+      method: 'POST'
+    }, {
+      message: escapedText,
+      voice: twilioVoice,
+      rate: rate
+    });
 
     // Track sent messages
     callData.messagesSent.push({
