@@ -59,7 +59,6 @@ const PhoneInterface: React.FC = () => {
   const textAreaRef = useRef<HTMLTextAreaElement>(null);
   const durationIntervalRef = useRef<number | null>(null);
   const statusCheckIntervalRef = useRef<number | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
   const websocketRef = useRef<WebSocket | null>(null);
   const audioElementRef = useRef<HTMLAudioElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
