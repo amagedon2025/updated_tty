@@ -124,74 +124,41 @@ const PhoneInterface: React.FC = () => {
 
   // WebSocket connection for live audio streaming
   useEffect(() => {
-    if (callState.isActive && callState.streamingEnabled) {
-      const wsUrl = API_BASE_URL.replace('https://', 'wss://').replace('http://', 'ws://');
+    if (callState.isActive && callState.streamingEnabled && callState.callSid) {
+      const wsUrl = API_BASE_URL.replace('https://', 'wss://').replace('http://', 'ws://') + '/media-stream';
       
       try {
+        console.log('🔌 Connecting to WebSocket:', wsUrl);
         websocketRef.current = new WebSocket(wsUrl);
         
         websocketRef.current.onopen = () => {
           console.log('🔌 Live audio WebSocket connected');
           setCallState(prev => ({ ...prev, audioConnected: true }));
-          
-          // Join the call for audio streaming
-          if (callState.callSid) {
-            websocketRef.current?.send(JSON.stringify({
-              type: 'join-call',
-              callSid: callState.callSid
-            }));
-          }
         };
         
         websocketRef.current.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            
-            if (data.type === 'joined') {
-              console.log('🎵 Joined call audio stream:', data.callSid);
-            } else if (data.type === 'audio' && audioContextRef.current && !audioMuted) {
-              // Play live audio from Twilio media stream
-              try {
-                // Decode base64 audio payload
-                const audioData = atob(data.payload);
-                const audioBuffer = new ArrayBuffer(audioData.length);
-                const view = new Uint8Array(audioBuffer);
-                
-                for (let i = 0; i < audioData.length; i++) {
-                  view[i] = audioData.charCodeAt(i);
-                }
-                
-                // Play through Web Audio API
-                audioContextRef.current.decodeAudioData(audioBuffer.slice(0))
-                  .then(buffer => {
-                    const source = audioContextRef.current!.createBufferSource();
-                    const gainNode = audioContextRef.current!.createGain();
-                    
-                    source.buffer = buffer;
-                    gainNode.gain.value = audioVolume;
-                    
-                    source.connect(gainNode);
-                    gainNode.connect(audioContextRef.current!.destination);
-                    
-                    source.start();
-                  })
-                  .catch(error => {
-                    console.error('Audio decode error:', error);
-                  });
-              } catch (audioError) {
-                console.error('Audio processing error:', audioError);
+          console.log('📨 WebSocket message received:', event.data);
+          
+          // Handle different message types
+          if (typeof event.data === 'string') {
+            try {
+              const data = JSON.parse(event.data);
+              console.log('📨 Parsed WebSocket data:', data);
+              
+              if (data.event === 'start') {
+                console.log('🎵 Media stream started for call:', data.callSid);
+                setCallState(prev => ({ ...prev, audioConnected: true }));
+              } else if (data.event === 'media' && data.media) {
+                console.log('🎵 Received audio data, payload length:', data.media.payload?.length);
+                // Play audio data
+                playAudioData(data.media.payload);
+              } else if (data.event === 'stop') {
+                console.log('🔇 Media stream stopped');
+                setCallState(prev => ({ ...prev, audioConnected: false }));
               }
-            } else if (data.type === 'call-ended') {
-              console.log('📞 Call ended via WebSocket');
-              setCallState(prev => ({
-                ...prev,
-                isActive: false,
-                isConnecting: false,
-                audioConnected: false
-              }));
+            } catch (parseError) {
+              console.error('Error parsing WebSocket message:', parseError);
             }
-          } catch (error) {
-            console.error('WebSocket message error:', error);
           }
         };
         
@@ -215,7 +182,46 @@ const PhoneInterface: React.FC = () => {
         websocketRef.current.close();
       }
     };
-  }, [callState.isActive, callState.streamingEnabled, audioMuted, audioVolume]);
+  }, [callState.isActive, callState.streamingEnabled, callState.callSid]);
+
+  // Function to play audio data
+  const playAudioData = async (base64Payload: string) => {
+    if (!audioContextRef.current || audioMuted) return;
+    
+    try {
+      // Decode base64 audio payload (mulaw format from Twilio)
+      const binaryString = atob(base64Payload);
+      const bytes = new Uint8Array(binaryString.length);
+      
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      
+      // Convert mulaw to PCM (simplified conversion)
+      const pcmData = new Float32Array(bytes.length);
+      for (let i = 0; i < bytes.length; i++) {
+        // Basic mulaw to linear conversion
+        pcmData[i] = (bytes[i] - 128) / 128.0;
+      }
+      
+      // Create audio buffer and play
+      const audioBuffer = audioContextRef.current.createBuffer(1, pcmData.length, 8000);
+      audioBuffer.getChannelData(0).set(pcmData);
+      
+      const source = audioContextRef.current.createBufferSource();
+      const gainNode = audioContextRef.current.createGain();
+      
+      source.buffer = audioBuffer;
+      gainNode.gain.value = audioVolume;
+      
+      source.connect(gainNode);
+      gainNode.connect(audioContextRef.current.destination);
+      
+      source.start();
+    } catch (error) {
+      console.error('Error playing audio data:', error);
+    }
+  };
 
   // Status monitoring
   useEffect(() => {
